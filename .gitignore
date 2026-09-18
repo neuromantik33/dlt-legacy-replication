@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+_storage/
+*.duckdb
+*.wal
+# real credentials; copy .dlt/example.secrets.toml to .dlt/secrets.toml
+sources/.dlt/secrets.toml
