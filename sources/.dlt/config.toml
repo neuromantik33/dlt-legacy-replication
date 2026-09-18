@@ -1,0 +1,10 @@
+# Carried over from the monorepo's sources/.dlt/config.toml, minus the ~30 other
+# sources' settings. The tests' test_config_providers fixture points dlt at this
+# directory.
+[runtime]
+log_level="WARNING"
+dlthub_telemetry = false
+
+# The source snapshots tables through dlt.sources.sql_database.
+[sources.sql_database.data_writer]
+buffer_max_items=5000
