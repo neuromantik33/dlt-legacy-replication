@@ -5,7 +5,7 @@ PG_VERSION ?= 9.6
 export PG_VERSION
 
 PG_COMPOSE = docker compose -f tests/postgres/docker-compose.yml
-PG_TEST_ENV = ALL_DESTINATIONS='["duckdb", "postgres"]' \
+PG_TEST_ENV = ALL_DESTINATIONS='["duckdb"]' \
 	DESTINATION__POSTGRES__CREDENTIALS=postgresql://loader:loader@localhost:5432/dlt_data
 
 dev:

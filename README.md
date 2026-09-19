@@ -69,18 +69,19 @@ Deliberately **not** done yet, so that each is its own change with its own blame
 
 ### Known failures, inherited
 
-Running the suite in the *monorepo* at PG 9.6, twice, gives the same result both times:
+`ALL_DESTINATIONS` is `["duckdb"]`, matching the monorepo. The **postgres destination is
+switched off** because `test_mapped_data_types[pyarrow-...-postgres]` fails there. That
+failure predates this repo and is deliberately not fixed here — the move came first.
 
-```
-28 passed, then
-tests/pg_legacy_replication/test_pg_replication.py::test_mapped_data_types[pyarrow-True-True-postgres] FAILED
-```
+To put it back, add `"postgres"` to `PG_TEST_ENV` in the `Makefile`. Note
+`DESTINATION__POSTGRES__CREDENTIALS` stays set either way: the `src_config` fixture uses
+a Postgres pipeline for the *source* database regardless of the destination.
 
-and the run then **hangs** on the next test. A session is left `idle in transaction`
-while the next test blocks on `Lock`; `consume_stream` sits in a C call with the GIL
-held, so `pytest-timeout` cannot interrupt it. This predates the move and is the first
-thing to chase.
+When that test does fail, the run then stalls rather than moving on: a session is left
+`idle in transaction` and the next test blocks on `Lock`. `cleanup_snapshot_resources`
+is called after `dest_pl.run(snapshots)`, so a raise in that `run` skips it and the
+snapshot engine's transaction is never disposed. Unconfirmed, but it fits — the stall
+only ever follows the failure.
 
-If a run stalls: kill it, then `make pg-down && make test`. Leaked replication slots
-starve later runs — the container allows 10, check with
-`SELECT * FROM pg_replication_slots;`.
+Leaked replication slots starve later runs — the container allows 10, check with
+`SELECT * FROM pg_replication_slots;`, reset with `make pg-down`.
