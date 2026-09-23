@@ -1,19 +1,20 @@
 # pg_legacy_replication
 
 A [dlt](https://dlthub.com) source that replicates a Postgres database via logical
-decoding, using Debezium's `decoderbufs` output plugin — so it works on **Postgres < 10**,
-where `pgoutput` does not exist.
+decoding, using Debezium's `decoderbufs` output plugin. That plugin is what lets it run
+against **Postgres < 10**, where `pgoutput` does not exist.
 
-Source docs, including the server-side plugin setup and credentials:
-[`sources/pg_legacy_replication/README.md`](sources/pg_legacy_replication/README.md).
+Server-side plugin setup, credentials and the differences from dlt's own `pg_replication`
+source: [`sources/pg_legacy_replication/README.md`](sources/pg_legacy_replication/README.md).
 
 Extracted from a fork of `dlt-hub/verified-sources`, which no longer accepts new sources.
 
 ## Using it
 
 There is no package to install. Copy `sources/pg_legacy_replication/` into your project
-next to your pipeline script, exactly as `dlt init` would, and install its
-`requirements.txt`. `sources/pg_legacy_replication_pipeline.py` is a worked example.
+next to your pipeline script, as `dlt init` would, and depend on
+`dlt[sql-database]`, `psycopg2-binary` and `protobuf>=5`.
+`pg_legacy_replication_pipeline.py` is a worked example.
 
 ## Developing
 
@@ -25,63 +26,43 @@ make lint       # ruff check
 make format     # ruff format
 make typecheck  # pyrefly check
 make test       # pytest
+make ci         # typecheck, lint, test with coverage
 ```
 
 Credentials: copy `sources/.dlt/example.secrets.toml` to `sources/.dlt/secrets.toml`.
 
 ### Postgres versions
 
-`make test` defaults to **9.6** — what exercises the pre-10 code paths this source
-exists for. The image is `debezium/postgres`, which ships `decoderbufs` prebuilt.
+The test server runs in docker and defaults to **9.6**, which is what exercises the pre-10
+code paths this source exists for. The image is `debezium/postgres`, which ships
+`decoderbufs` prebuilt.
 
 ```bash
-make test PG_VERSION=14
-make pg-down            # also removes the volume
+make pg-up                  # 9.6 on localhost:5432
+make test
+make pg-up PG_VERSION=14    # each major gets its own compose project and volume
+make pg-down PG_VERSION=14  # also removes that volume
 ```
 
-The `pg_version` fixture asks the running server for `server_version_num` rather than
-trusting `PG_VERSION`.
+`PG_VERSION` picks the image, nothing else. The `pg_version` fixture asks the running
+server for `server_version_num`, so the tests branch on what they are actually talking to
+rather than on what the variable says.
 
-## State of the port
+Two code paths differ by version. `advance_slot` uses `pg_replication_slot_advance` on 11
+and up, and `pg_logical_slot_get_binary_changes` below that, where the function does not
+exist yet. `get_max_lsn` reads the `lsn` column on 10 and up, `location` below.
 
-This repo is a deliberate straight move. Everything under `sources/` and
-`tests/pg_legacy_replication/` is byte-identical to the monorepo, and
-`tests/utils.py`, `tests/conftest.py`, `tests/__init__.py` and `pytest.ini` are verbatim
-copies of the monorepo's shared test files. Only the tooling changed:
+## Destinations
 
-| was | now |
-|---|---|
-| poetry + `poetry.lock` (36 sources) | uv + `uv.lock` (this source only) |
-| black, flake8 (configured in `tox.ini`) | ruff |
-| mypy | *nothing yet* |
-| 7 workflows | one lint workflow |
+`ALL_DESTINATIONS` is `["duckdb"]`, carried over from the monorepo.
+`DESTINATION__POSTGRES__CREDENTIALS` still has to be set, because the `src_config` fixture
+runs a Postgres pipeline for the *source* database whatever the destination is. To test
+another destination, add it to `PG_TEST_ENV` in the `Makefile`.
 
-Deliberately **not** done yet, so that each is its own change with its own blame:
+The postgres destination is off because the four `test_mapped_data_types[pyarrow-*]` cases
+fail there, inherited and not fixed here: dlt normalizes the arrow batch to csv and refuses
+the `col7` binary column, `Arrow data contains string or binary columns with invalid UTF-8
+characters`. The other 25 pass.
 
-- **No formatting pass.** `ruff format` has not been run; the source is as it was under
-  black. `make format` when you want it.
-- **Narrow lint rules.** Only `E4,E7,E9,F` plus the banned-imports carried over from
-  `tox.ini`. Turning on `I` (import sorting), `B` (bugbear) or `UP` (pyupgrade) will each
-  produce real findings — see below.
-- **No type checker.** mypy is gone, pyrefly not yet added.
-- **dlt still pinned to 1.8.1**, exactly as the monorepo resolved it. Bump after the
-  suite is trusted.
-
-### Known failures, inherited
-
-`ALL_DESTINATIONS` is `["duckdb"]`, matching the monorepo. The **postgres destination is
-switched off** because `test_mapped_data_types[pyarrow-...-postgres]` fails there. That
-failure predates this repo and is deliberately not fixed here — the move came first.
-
-To put it back, add `"postgres"` to `PG_TEST_ENV` in the `Makefile`. Note
-`DESTINATION__POSTGRES__CREDENTIALS` stays set either way: the `src_config` fixture uses
-a Postgres pipeline for the *source* database regardless of the destination.
-
-When that test does fail, the run then stalls rather than moving on: a session is left
-`idle in transaction` and the next test blocks on `Lock`. `cleanup_snapshot_resources`
-is called after `dest_pl.run(snapshots)`, so a raise in that `run` skips it and the
-snapshot engine's transaction is never disposed. Unconfirmed, but it fits — the stall
-only ever follows the failure.
-
-Leaked replication slots starve later runs — the container allows 10, check with
-`SELECT * FROM pg_replication_slots;`, reset with `make pg-down`.
+Leaked replication slots starve later runs. The compose file allows 10, up from the
+image's 4. Check with `SELECT * FROM pg_replication_slots;`, reset with `make pg-down`.

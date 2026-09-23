@@ -3,6 +3,7 @@ from collections import defaultdict
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from functools import partial
+from time import sleep
 from typing import (
     Any,
     Callable,
@@ -85,14 +86,17 @@ def configure_engine(
 ) -> Engine:
     """
     Configures the SQLAlchemy engine.
-    Also attaches the replication connection in order to prevent it being garbage collected and closed.
+
+    The replication connection rides along on the engine: the exported snapshot stays
+    readable only while that connection is open, and disposing the engine closes it.
 
     Args:
         snapshot_name (str, optional): This is used during the initial first table snapshot allowing
             all transactions to run with the same consistent snapshot.
     """
     engine: Engine = engine_from_credentials(credentials, pool_size=10, max_overflow=-1)
-    engine.execution_options(stream_results=True, max_row_buffer=2 * 50000)
+    # execution_options returns a new engine, it does not mutate this one
+    engine = engine.execution_options(stream_results=True, max_row_buffer=2 * 50000)
     setattr(engine, "rep_conn", rep_conn)  # noqa
 
     @sa.event.listens_for(engine, "begin")
@@ -119,7 +123,14 @@ def configure_engine(
 
 
 def cleanup_snapshot_resources(snapshots: DltSource) -> None:
-    """FIXME Awful hack to release the underlying SQL engine when snapshotting tables"""
+    """Disposes the engine behind the snapshot resources, which closes the replication connection.
+
+    Call it in a `finally`: skip it and the exported-snapshot transaction stays open,
+    and the next CREATE_REPLICATION_SLOT blocks on that transaction id until the
+    process exits.
+
+    FIXME Awful hack, it reaches into the resource's explicit args to find the engine.
+    """
     resources = snapshots.resources
     if resources:
         engine: Engine = next(iter(resources.values()))._explicit_args["credentials"]
@@ -204,8 +215,9 @@ def advance_slot(
     Advances position in the replication slot.
 
     Flushes all messages upto (and including) the message with LSN = `upto_lsn`.
-    This function is used as alternative to psycopg2's `send_feedback` method, because
-    the behavior of that method seems odd when used outside of `consume_stream`.
+    Called at the start of a run with the LSN dlt committed to the destination, so the
+    WAL is only discarded once the load package holding it has landed. Consuming the
+    stream never flushes the slot itself.
     """
     assert upto_lsn > 0
     with _get_cursor(credentials) as cur:
@@ -280,16 +292,15 @@ class MessageConsumer:
     target_batch_size: int = 1000
 
     _consumed_all: bool = False
-    _data_items: Dict[str, List[TDataItem]] = field(init=False)
+    # maps table names to list of data items
+    _data_items: DefaultDict[str, List[TDataItem]] = field(
+        default_factory=lambda: defaultdict(list)
+    )
     # maps table name to table schema
     _last_table_schema: Dict[str, TTableSchema] = field(default_factory=dict)
     # maps table names to new_typeinfo hashes
     _last_table_hashes: Dict[str, int] = field(default_factory=dict)
-    _last_commit_lsn: int = field(init=False)
-
-    def __post_init__(self):
-        # maps table names to list of data items
-        self._data_items: Dict[str, List[TDataItem]] = defaultdict(list)
+    _last_commit_lsn: Optional[int] = None
 
     def __call__(self, msg: ReplicationMessage) -> None:
         """Processes message received from stream."""
@@ -340,9 +351,8 @@ class MessageConsumer:
         self._last_commit_lsn = lsn
         if lsn >= self.upto_lsn:
             self._consumed_all = True
-        n_items = sum(
-            [len(items) for items in self._data_items.values()]
-        )  # combine items for all tables
+        # combine items for all tables
+        n_items = sum(len(items) for items in self._data_items.values())
         if self._consumed_all or n_items >= self.target_batch_size:
             raise StopReplication
 
@@ -362,10 +372,10 @@ class MessageConsumer:
         schema, table_name = msg.table.split(".")
         last_schema = self._last_table_schema.get(table_name)
 
-        # Used cached schema if the operation is a DELETE
+        # Use the cached schema if the operation is a DELETE
         if msg.op == Op.DELETE:
             if last_schema is None:
-                # If absent than reflect it using sqlalchemy
+                # If absent, reflect it using sqlalchemy
                 last_schema = self._fetch_table_schema_with_sqla(schema, table_name)
                 self._last_table_schema[table_name] = last_schema
             return last_schema
@@ -452,7 +462,6 @@ class ItemGenerator:
 
         Starts replication of messages from the replication slot.
         Maintains LSN of last consumed commit message in object state.
-        Advances the slot only when all messages have been consumed.
         """
         rep_conn = get_rep_conn(self.credentials)
         with closing(rep_conn), rep_conn.cursor() as rep_cur:
@@ -484,6 +493,13 @@ class ItemGenerator:
         self, cur: ReplicationCursor, consumer: MessageConsumer
     ) -> Iterator[TableItems]:
         last_commit_lsn = consumer._last_commit_lsn
+        if last_commit_lsn is None:
+            # Stopped mid transaction, on a schema change. The rows are committed data,
+            # the decoder only ever emits committed transactions, but a batch can only
+            # restart from a commit boundary and this one has no commit yet. Drop them
+            # and let the next pass re-read the transaction from its start.
+            logger.warning("Stopped before the first commit, nothing to flush")
+            return
         consumed_all = consumer._consumed_all
         for table, data_items in consumer._data_items.items():
             logger.info("Flushing %s events for table '%s'", len(data_items), table)
@@ -525,8 +541,6 @@ class ItemGenerator:
             self.slot_name,
             pid,
         )
-        from time import sleep
-
         sleep(10)
         if pid_after_wait := find_active_pid_for_slot():
             logger.warning(
@@ -593,10 +607,7 @@ class BackendHandler:
         self, columns: TTableSchemaColumns, items: List[TDataItem]
     ) -> Iterator[DataItemWithMeta]:
         # Create rows for pyarrow using ordered column keys
-        rows = [
-            tuple(item.get(column, None) for column in list(columns.keys()))
-            for item in items
-        ]
+        rows = [tuple(item.get(column) for column in columns) for item in items]
         backend_kwargs = self.repl_options.get("backend_kwargs") or {}
         tz = backend_kwargs.get("tz", "UTC")
         yield dlt.mark.with_table_name(
@@ -607,8 +618,7 @@ class BackendHandler:
 
 def infer_table_schema(msg: RowMessage, options: ReplicationOptions) -> TTableSchema:
     """Infers the table schema from the replication message and optional hints."""
-    # Choose the correct source based on operation type
-    assert msg.op != Op.DELETE
+    assert msg.op != Op.DELETE, "A delete carries no type info to infer from"
     included_columns = options.get("included_columns")
     columns = {
         col_name: _to_dlt_column_schema(

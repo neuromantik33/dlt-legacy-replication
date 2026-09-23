@@ -4,16 +4,17 @@ from dlt.destinations.impl.postgres.configuration import PostgresCredentials
 
 from sources.pg_legacy_replication import init_replication, replication_source
 
-PG_CREDS = dlt.secrets.get("sources.pg_replication.credentials", PostgresCredentials)
+PG_CREDS = dlt.secrets.get(
+    "sources.pg_legacy_replication.credentials", PostgresCredentials
+)
 
 
 def replicate_single_table() -> None:
     """Sets up replication for a single Postgres table and loads changes into a destination.
 
     Demonstrates basic usage of `init_replication` helper and `replication_resource` resource.
-    Uses `src_pl` to create and change the replicated Postgres table—this
-    is only for demonstration purposes, you won't need this when you run in production
-    as you'll probably have another process feeding your Postgres instance.
+    Uses `src_pl` to create and change the replicated Postgres table. That part is only
+    for demonstration, in production another process feeds your Postgres instance.
     """
     # create source and destination pipelines
     src_pl = get_postgres_pipeline()
@@ -29,7 +30,7 @@ def replicate_single_table() -> None:
         src_pl, "CREATE TABLE {table_name} (id integer PRIMARY KEY, val bool);"
     )
 
-    # initialize replication for the source table—this creates a replication slot and publication
+    # initialize replication for the source table, which creates the replication slot
     slot_name = "example_slot"
     init_replication(  # requires the Postgres user to have the REPLICATION attribute assigned
         slot_name=slot_name,

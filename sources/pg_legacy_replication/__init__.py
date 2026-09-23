@@ -40,7 +40,7 @@ def replication_source(
 
     - Relies on a replication slot that publishes DML operations (i.e. `insert`, `update`, and `delete`).
     - Maintains LSN of last consumed message in state to track progress.
-    - At start of the run, advances the slot upto last consumed message in previous run (for pg>10 only)
+    - At start of the run, advances the slot upto the last message consumed by the previous run
     - Processes in batches to limit memory usage.
 
     Args:
@@ -71,8 +71,10 @@ def replication_source(
         target_batch_size (int, optional):
             The target size of each batch of replicated data items. Defaults to `1000`.
         flush_slot (bool, optional):
-            If `True`, advances the replication slot to the last processed LSN
-            to prevent replaying already replicated changes. Defaults to `True`.
+            If `True`, advances the replication slot at the start of the next run, up to
+            the LSN the previous run committed to the destination. Set it to `False` and
+            the slot never moves, so the WAL grows until something else advances it.
+            Defaults to `True`.
 
     Yields:
         Iterable[DltResource]:
@@ -112,12 +114,12 @@ def replication_source(
                 target_batch_size=target_batch_size,
             )
             yield from gen
+            if gen.last_commit_lsn is None:  # nothing consumed, no way to make progress
+                break
             if gen.generated_all:
-                assert gen.last_commit_lsn is not None
                 dlt.current.resource_state()["last_commit_lsn"] = gen.last_commit_lsn
                 break
-            if gen.last_commit_lsn is not None:
-                start_lsn = gen.last_commit_lsn
+            start_lsn = gen.last_commit_lsn
 
     wal_reader = replication_resource(slot_name)
 

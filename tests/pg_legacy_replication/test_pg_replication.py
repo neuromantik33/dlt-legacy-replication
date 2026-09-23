@@ -111,8 +111,10 @@ def test_core_functionality(
     )
 
     # initial load
-    info = dest_pl.run(snapshots)
-    cleanup_snapshot_resources(snapshots)
+    try:
+        info = dest_pl.run(snapshots)
+    finally:
+        cleanup_snapshot_resources(snapshots)
     assert_load_info(info)
     assert load_table_counts(dest_pl, "tbl_x", "tbl_y") == {"tbl_x": 1, "tbl_y": 1}
     exp_tbl_x = [{"id_x": 1, "val_x": "foo"}]
@@ -348,8 +350,10 @@ def test_mapped_data_types(
         pipeline_name="dest_pl", destination=destination_name, dev_mode=True
     )
     if init_load:
-        info = dest_pl.run(snapshot)
-        cleanup_snapshot_resources(snapshot)
+        try:
+            info = dest_pl.run(snapshot)
+        finally:
+            cleanup_snapshot_resources(snapshot)
         assert_load_info(info)
         assert load_table_counts(dest_pl, "items")["items"] == 1
 
@@ -537,8 +541,10 @@ def test_included_columns(
         pipeline_name="dest_pl", destination=destination_name, dev_mode=True
     )
     if init_load:
-        dest_pl.run(snapshots)
-        cleanup_snapshot_resources(snapshots)
+        try:
+            dest_pl.run(snapshots)
+        finally:
+            cleanup_snapshot_resources(snapshots)
         assert get_cols(dest_pl, "tbl_x") == {"id_x", "val_x"}
         assert get_cols(dest_pl, "tbl_y") == {"id_y", "val_y"}
         assert get_cols(dest_pl, "tbl_z") == {"id_z", "val_z", "another_col_z"}
@@ -634,8 +640,10 @@ def test_column_hints(
         pipeline_name="dest_pl", destination=destination_name, dev_mode=True
     )
     if init_load:
-        dest_pl.run(snapshots)
-        cleanup_snapshot_resources(snapshots)
+        try:
+            dest_pl.run(snapshots)
+        finally:
+            cleanup_snapshot_resources(snapshots)
         assert (
             dest_pl.default_schema.get_table_columns("tbl_x")["another_col_x"][
                 "data_type"
@@ -805,8 +813,10 @@ def test_delete_schema_bug(
     )
 
     # initial load
-    info = dest_pl.run(snapshots)
-    cleanup_snapshot_resources(snapshots)
+    try:
+        info = dest_pl.run(snapshots)
+    finally:
+        cleanup_snapshot_resources(snapshots)
     assert_load_info(info)
     assert load_table_counts(dest_pl, "items") == {"items": 100}
     assert_loaded_data(dest_pl, "items", ["id", "val"], data, "id")
