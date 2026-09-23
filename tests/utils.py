@@ -1,32 +1,29 @@
 import os
-import sys
 import platform
-import pytest
-from typing import Any, Iterator, List, Sequence, Dict, Optional, Set
 from os import environ
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Set
 from unittest.mock import patch
 
 import dlt
+import pytest
 from dlt.common import json, known_env
-from dlt.common.data_types import py_type_to_sc_type
-from dlt.common.typing import DictStrAny, TDataItem
 from dlt.common.configuration.container import Container
-from dlt.common.configuration.specs import PluggableRunContext
 from dlt.common.configuration.providers import (
-    EnvironProvider,
     ConfigTomlProvider,
+    EnvironProvider,
     SecretsTomlProvider,
 )
+from dlt.common.configuration.specs import PluggableRunContext
 from dlt.common.configuration.specs.pluggable_run_context import (
     SupportsRunContext,
 )
+from dlt.common.data_types import py_type_to_sc_type
+from dlt.common.destination.exceptions import SqlClientNotAvailable
+from dlt.common.pipeline import ExtractInfo, LoadInfo, PipelineContext
 from dlt.common.runtime.run_context import DOT_DLT, RunContext
-from dlt.common.pipeline import LoadInfo, PipelineContext, ExtractInfo
-from dlt.common.storages import FileStorage
 from dlt.common.schema.typing import TTableSchema
-from dlt.common.utils import set_working_dir
-
-from dlt.pipeline.exceptions import SqlClientNotAvailable
+from dlt.common.storages import FileStorage
+from dlt.common.typing import DictStrAny, TDataItem
 
 TEST_STORAGE_ROOT = "_storage"
 
@@ -332,9 +329,9 @@ def assert_schema_on_data(
         # check data types
         for key, value in row.items():
             if value is None:
-                assert table_columns[key][
-                    "nullable"
-                ], f"column {key} must be nullable: value is None"
+                assert table_columns[key]["nullable"], (
+                    f"column {key} must be nullable: value is None"
+                )
                 # next value. we cannot validate data type
                 columns_with_nulls.add(key)
                 continue

@@ -1,22 +1,26 @@
+import socket
 from copy import deepcopy
 from typing import Dict, Tuple
 
 import dlt
 import pytest
+from dlt.common.configuration.specs import ConnectionStringCredentials
 from dlt.common.schema.typing import TTableSchemaColumns
 from dlt.destinations.job_client_impl import SqlJobClientBase
 
 from sources.pg_legacy_replication import (
-    init_replication,
     cleanup_snapshot_resources,
+    init_replication,
     replication_source,
 )
-from sources.pg_legacy_replication.helpers import TableBackend
-from tests.utils import (
-    ALL_DESTINATIONS,
-    assert_load_info,
-    load_table_counts,
+from sources.pg_legacy_replication.helpers import (
+    ReplicationOptions,
+    TableBackend,
+    advance_slot,
+    get_max_lsn,
 )
+from tests.utils import ALL_DESTINATIONS, assert_load_info, load_table_counts
+
 from .cases import TABLE_ROW_ALL_DATA_TYPES, TABLE_UPDATE_COLUMNS_SCHEMA
 from .utils import add_pk, apply_legacy_dedup_sort, assert_loaded_data
 
@@ -24,6 +28,18 @@ merge_hints: TTableSchemaColumns = {
     "_pg_deleted_ts": {"hard_delete": True},
     "_pg_lsn": {"dedup_sort": "desc"},
 }
+
+
+def _open(port: int) -> bool:
+    with socket.socket() as s:
+        s.settimeout(0.5)
+        return s.connect_ex(("localhost", port)) == 0
+
+
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(not _open(5432), reason="needs a postgres on :5432"),
+]
 
 
 @pytest.mark.parametrize("destination_name", ALL_DESTINATIONS)
@@ -312,7 +328,7 @@ def test_mapped_data_types(
     if init_load and give_hints:
         snapshot.items.apply_hints(columns=column_schema)
 
-    repl_options = {"items": {"backend": backend}}
+    repl_options: Dict[str, ReplicationOptions] = {"items": {"backend": backend}}
     if give_hints:
         repl_options["items"]["column_hints"] = column_schema
     changes = replication_source(
@@ -488,8 +504,8 @@ def test_included_columns(
 
     # initialize replication and create resources
     table_options = {
-        "tbl_x": {"backend": backend, "included_columns": {"id_x", "val_x"}},
-        "tbl_y": {"backend": backend, "included_columns": {"id_y", "val_y"}},
+        "tbl_x": {"backend": backend, "included_columns": ["id_x", "val_x"]},
+        "tbl_y": {"backend": backend, "included_columns": ["id_y", "val_y"]},
         "tbl_z": {"backend": backend},
         # tbl_z is not specified, hence all columns should be included
     }
@@ -824,3 +840,25 @@ def test_delete_schema_bug(
     info = dest_pl.run(changes)
     assert_load_info(info, expected_load_packages=2)
     assert load_table_counts(dest_pl, "items") == {"items": 50}
+
+
+def test_advance_slot(src_config: Tuple[dlt.Pipeline, str]) -> None:
+    """The slot moves on every major, not just the pg11+ ones with pg_replication_slot_advance."""
+
+    @dlt.resource
+    def items(data):
+        yield data
+
+    src_pl, slot_name = src_config
+    credentials = dlt.secrets.get(
+        "sources.pg_legacy_replication.credentials", ConnectionStringCredentials
+    )
+
+    init_replication(slot_name=slot_name, schema=src_pl.dataset_name)
+    src_pl.run(items([{"id": 1}]))
+
+    upto_lsn = get_max_lsn(credentials, slot_name)
+    assert upto_lsn is not None
+
+    advance_slot(upto_lsn, slot_name, credentials)
+    assert get_max_lsn(credentials, slot_name) is None

@@ -10,6 +10,7 @@ from sources.pg_legacy_replication.helpers import (
     infer_table_schema,
 )
 from sources.pg_legacy_replication.pg_logicaldec_pb2 import Op, RowMessage
+
 from .cases import (
     DATA_ITEMS,
     ROW_MESSAGES,

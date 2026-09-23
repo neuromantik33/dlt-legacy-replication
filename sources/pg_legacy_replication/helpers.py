@@ -16,6 +16,7 @@ from typing import (
     Optional,
     Sequence,
     Set,
+    Tuple,
     TypedDict,
 )
 
@@ -23,7 +24,6 @@ import dlt
 import psycopg2
 from dlt.common import logger
 from dlt.common.libs.sql_alchemy import Engine, MetaData, Table, sa
-from dlt.common.pendulum import pendulum
 from dlt.common.schema.typing import TColumnSchema, TTableSchema, TTableSchemaColumns
 from dlt.common.schema.utils import merge_column
 from dlt.common.typing import TDataItem
@@ -35,11 +35,12 @@ from dlt.sources.sql_database import (
     TableBackend,
     TQueryAdapter,
     TTypeAdapter,
-    arrow_helpers as arrow,
     engine_from_credentials,
 )
+from dlt.sources.sql_database import arrow_helpers as arrow
 from dlt.sources.sql_database.schema_types import sqla_col_to_column_schema
-from psycopg2.extensions import connection as ConnectionExt, cursor
+from psycopg2.extensions import connection as ConnectionExt
+from psycopg2.extensions import cursor
 from psycopg2.extras import (
     LogicalReplicationConnection,
     ReplicationCursor,
@@ -52,28 +53,29 @@ from .schema_types import _epoch_micros_to_datetime, _to_dlt_column_schema, _to_
 
 
 class ReplicationOptions(TypedDict, total=False):
-    backend: Optional[TableBackend]
-    backend_kwargs: Optional[Mapping[str, Any]]
-    column_hints: Optional[TTableSchemaColumns]
-    include_lsn: Optional[bool]  # Default is true
-    include_deleted_ts: Optional[bool]  # Default is true
-    include_commit_ts: Optional[bool]
-    include_tx_id: Optional[bool]
-    included_columns: Optional[Set[str]]
+    backend: TableBackend
+    backend_kwargs: Mapping[str, Any]
+    column_hints: TTableSchemaColumns
+    include_lsn: bool  # Default is true
+    include_deleted_ts: bool  # Default is true
+    include_commit_ts: bool
+    include_tx_id: bool
+    included_columns: List[str]
+    reflection_level: ReflectionLevel
 
 
 class SqlTableOptions(TypedDict, total=False):
     backend: TableBackend
-    backend_kwargs: Optional[Dict[str, Any]]
+    backend_kwargs: Dict[str, Any]
     chunk_size: int
-    defer_table_reflect: Optional[bool]
-    detect_precision_hints: Optional[bool]
-    included_columns: Optional[List[str]]
-    metadata: Optional[MetaData]
-    query_adapter_callback: Optional[TQueryAdapter]
-    reflection_level: Optional[ReflectionLevel]
-    table_adapter_callback: Optional[Callable[[Table], None]]
-    type_adapter_callback: Optional[TTypeAdapter]
+    defer_table_reflect: bool
+    detect_precision_hints: bool
+    included_columns: List[str]
+    metadata: MetaData
+    query_adapter_callback: TQueryAdapter
+    reflection_level: ReflectionLevel
+    table_adapter_callback: Callable[[Table], None]
+    type_adapter_callback: TTypeAdapter
 
 
 def configure_engine(
@@ -107,6 +109,10 @@ def configure_engine(
 
     @sa.event.listens_for(engine, "engine_disposed")
     def on_engine_disposed(e: Engine) -> None:
+        # Close it here: dropping the reference leaves the exported-snapshot
+        # transaction open until GC gets around to it, and any later
+        # CREATE_REPLICATION_SLOT blocks on that transaction id.
+        rep_conn.close()
         delattr(e, "rep_conn")
 
     return engine
@@ -132,7 +138,7 @@ def create_replication_slot(  # type: ignore[return]
     try:
         cur.create_replication_slot(name, output_plugin=output_plugin)
         logger.info("Successfully created replication slot '%s'", name)
-        result = cur.fetchone()
+        result: Tuple = cur.fetchone()  # pyrefly: ignore[bad-assignment]
         return {
             "slot_name": result[0],
             "consistent_point": result[1],
@@ -179,7 +185,8 @@ def get_max_lsn(
             (slot_name,),
         )
         row = cur.fetchone()
-        return row[0] if row else None  # type: ignore[no-any-return]
+        # pg_lsn subtraction is numeric, i.e. a Decimal, which has no `>>`
+        return int(row[0]) if row else None
 
 
 def lsn_int_to_hex(lsn: int) -> str:
@@ -202,10 +209,18 @@ def advance_slot(
     """
     assert upto_lsn > 0
     with _get_cursor(credentials) as cur:
-        # There is unfortunately no way in pg9.6 to manually advance the replication slot
-        if get_pg_version(cur) > 100000:
+        if get_pg_version(cur) >= 110000:
             cur.execute(
                 "SELECT * FROM pg_replication_slot_advance(%s, %s);",
+                (slot_name, lsn_int_to_hex(upto_lsn)),
+            )
+        else:
+            # pg_replication_slot_advance only lands in pg11. Before it, the way
+            # to move a slot from SQL is to consume it: `get_` is the sibling of
+            # the `peek_` call in get_max_lsn, and it is what moves
+            # confirmed_flush_lsn. count(*) keeps the decoded payload server-side.
+            cur.execute(
+                "SELECT count(*) FROM pg_logical_slot_get_binary_changes(%s, %s, NULL);",
                 (slot_name, lsn_int_to_hex(upto_lsn)),
             )
 
@@ -248,6 +263,7 @@ def get_rep_conn(
     return _get_conn(credentials, LogicalReplicationConnection)  # type: ignore[return-value]
 
 
+@dataclass
 class MessageConsumer:
     """
     Consumes messages from a ReplicationCursor sequentially.
@@ -257,29 +273,23 @@ class MessageConsumer:
     Maintains message data needed by subsequent messages in internal state.
     """
 
-    def __init__(
-        self,
-        credentials: ConnectionStringCredentials,
-        upto_lsn: int,
-        table_qnames: Set[str],
-        repl_options: DefaultDict[str, ReplicationOptions],
-        target_batch_size: int = 1000,
-    ) -> None:
-        self.credentials = credentials
-        self.upto_lsn = upto_lsn
-        self.table_qnames = table_qnames
-        self.target_batch_size = target_batch_size
-        self.repl_options = repl_options
+    credentials: ConnectionStringCredentials
+    upto_lsn: int
+    table_qnames: Set[str]
+    repl_options: DefaultDict[str, ReplicationOptions]
+    target_batch_size: int = 1000
 
-        self.consumed_all: bool = False
+    _consumed_all: bool = False
+    _data_items: Dict[str, List[TDataItem]] = field(init=False)
+    # maps table name to table schema
+    _last_table_schema: Dict[str, TTableSchema] = field(default_factory=dict)
+    # maps table names to new_typeinfo hashes
+    _last_table_hashes: Dict[str, int] = field(default_factory=dict)
+    _last_commit_lsn: int = field(init=False)
+
+    def __post_init__(self):
         # maps table names to list of data items
-        self.data_items: Dict[str, List[TDataItem]] = defaultdict(list)
-        # maps table name to table schema
-        self.last_table_schema: Dict[str, TTableSchema] = {}
-        # maps table names to new_typeinfo hashes
-        self.last_table_hashes: Dict[str, int] = {}
-        self.last_commit_ts: pendulum.DateTime
-        self.last_commit_lsn: int
+        self._data_items: Dict[str, List[TDataItem]] = defaultdict(list)
 
     def __call__(self, msg: ReplicationMessage) -> None:
         """Processes message received from stream."""
@@ -308,7 +318,6 @@ class MessageConsumer:
             )
 
             if row_msg.op == Op.BEGIN:
-                # self.last_commit_ts = _epoch_micros_to_datetime(row_msg.commit_time)
                 pass
             elif row_msg.op == Op.COMMIT:
                 self.process_commit(lsn=lsn)
@@ -328,13 +337,13 @@ class MessageConsumer:
 
         Raises StopReplication when `upto_lsn` or `target_batch_size` is reached.
         """
-        self.last_commit_lsn = lsn
+        self._last_commit_lsn = lsn
         if lsn >= self.upto_lsn:
-            self.consumed_all = True
+            self._consumed_all = True
         n_items = sum(
-            [len(items) for items in self.data_items.values()]
+            [len(items) for items in self._data_items.values()]
         )  # combine items for all tables
-        if self.consumed_all or n_items >= self.target_batch_size:
+        if self._consumed_all or n_items >= self.target_batch_size:
             raise StopReplication
 
     def process_change(self, msg: RowMessage, lsn: int) -> None:
@@ -346,35 +355,35 @@ class MessageConsumer:
         data_item = gen_data_item(
             msg, table_schema["columns"], lsn, **self.repl_options[table_name]
         )
-        self.data_items[table_name].append(data_item)
+        self._data_items[table_name].append(data_item)
 
     def get_table_schema(self, msg: RowMessage) -> TTableSchema:
         """Given a row message, calculates or fetches a table schema."""
         schema, table_name = msg.table.split(".")
-        last_schema = self.last_table_schema.get(table_name)
+        last_schema = self._last_table_schema.get(table_name)
 
         # Used cached schema if the operation is a DELETE
         if msg.op == Op.DELETE:
             if last_schema is None:
                 # If absent than reflect it using sqlalchemy
                 last_schema = self._fetch_table_schema_with_sqla(schema, table_name)
-                self.last_table_schema[table_name] = last_schema
+                self._last_table_schema[table_name] = last_schema
             return last_schema
 
         # Return cached schema if hash matches
         current_hash = hash_typeinfo(msg.new_typeinfo)
-        if current_hash == self.last_table_hashes.get(table_name):
-            return self.last_table_schema[table_name]
+        if current_hash == self._last_table_hashes.get(table_name):
+            return self._last_table_schema[table_name]
 
         new_schema = infer_table_schema(msg, self.repl_options[table_name])
         if last_schema is None:
             # Cache the inferred schema and hash if it is not already cached
-            self.last_table_schema[table_name] = new_schema
-            self.last_table_hashes[table_name] = current_hash
+            self._last_table_schema[table_name] = new_schema
+            self._last_table_hashes[table_name] = current_hash
         else:
             try:
                 retained_schema = compare_schemas(last_schema, new_schema)
-                self.last_table_schema[table_name] = retained_schema
+                self._last_table_schema[table_name] = retained_schema
             except AssertionError as e:
                 logger.info(str(e))
                 raise StopReplication
@@ -395,7 +404,7 @@ class MessageConsumer:
             metadata = MetaData(schema=schema)
             table = Table(table_name, metadata, autoload_with=engine)
             included_columns = options.get("included_columns")
-            columns = {
+            columns: Dict[str, TColumnSchema] = {  # pyrefly: ignore[bad-assignment]
                 col["name"]: col
                 for c in table.columns
                 if (col := to_col_schema(c)) is not None
@@ -447,6 +456,7 @@ class ItemGenerator:
         """
         rep_conn = get_rep_conn(self.credentials)
         with closing(rep_conn), rep_conn.cursor() as rep_cur:
+            consumer: Optional[MessageConsumer] = None
             try:
                 consumer = MessageConsumer(
                     credentials=self.credentials,
@@ -458,7 +468,8 @@ class ItemGenerator:
                 rep_cur.start_replication(self.slot_name, start_lsn=self.start_lsn)
                 rep_cur.consume_stream(consumer, self.keepalive_interval)
             except StopReplication:  # completed batch or reached `upto_lsn`
-                yield from self.flush_batch(rep_cur, consumer)
+                if consumer:
+                    yield from self.flush_batch(rep_cur, consumer)
             finally:
                 logger.debug(
                     "Closing connection... last_commit_lsn: %s, generated_all: %s, feedback_ts: %s",
@@ -472,20 +483,17 @@ class ItemGenerator:
     def flush_batch(
         self, cur: ReplicationCursor, consumer: MessageConsumer
     ) -> Iterator[TableItems]:
-        last_commit_lsn = consumer.last_commit_lsn
-        consumed_all = consumer.consumed_all
-        for table, data_items in consumer.data_items.items():
+        last_commit_lsn = consumer._last_commit_lsn
+        consumed_all = consumer._consumed_all
+        for table, data_items in consumer._data_items.items():
             logger.info("Flushing %s events for table '%s'", len(data_items), table)
-            yield TableItems(consumer.last_table_schema[table], data_items)
-        if consumed_all:
-            cur.send_feedback(
-                write_lsn=last_commit_lsn,
-                flush_lsn=last_commit_lsn,
-                reply=True,
-                force=True,
-            )
-        else:
-            cur.send_feedback(write_lsn=last_commit_lsn, reply=True, force=True)
+            yield TableItems(consumer._last_table_schema[table], data_items)
+        # write_lsn only: flush_lsn is what moves confirmed_flush_lsn, and
+        # confirming here would discard the WAL before the load package that
+        # carries these items has landed. The slot is advanced at the start of
+        # the next run, from the last_commit_lsn dlt committed to the
+        # destination with that package.
+        cur.send_feedback(write_lsn=last_commit_lsn, reply=True, force=True)
         self.last_commit_lsn = last_commit_lsn
         self.generated_all = consumed_all
 
@@ -589,7 +597,8 @@ class BackendHandler:
             tuple(item.get(column, None) for column in list(columns.keys()))
             for item in items
         ]
-        tz = self.repl_options.get("backend_kwargs", {}).get("tz", "UTC")
+        backend_kwargs = self.repl_options.get("backend_kwargs") or {}
+        tz = backend_kwargs.get("tz", "UTC")
         yield dlt.mark.with_table_name(
             arrow.row_tuples_to_arrow(rows, columns=columns, tz=tz),
             self.table,
@@ -662,7 +671,7 @@ def gen_data_item(
     include_deleted_ts: bool = True,
     include_commit_ts: bool = False,
     include_tx_id: bool = False,
-    included_columns: Optional[Set[str]] = None,
+    included_columns: Optional[List[str]] = None,
     **_: Any,
 ) -> TDataItem:
     """Generates data item from a row message and corresponding metadata."""
@@ -721,15 +730,15 @@ def compare_schemas(last: TTableSchema, new: TTableSchema) -> TTableSchema:
 
     table_schema = TTableSchema(name=last["name"], columns={})
     last_cols, new_cols = last["columns"], new["columns"]
-    assert len(last_cols) == len(
-        new_cols
-    ), f"Columns mismatch last:{last_cols} new:{new_cols}"
+    assert len(last_cols) == len(new_cols), (
+        f"Columns mismatch last:{last_cols} new:{new_cols}"
+    )
 
     for name, s1 in last_cols.items():
         s2 = new_cols.get(name)
-        assert (
-            s2 and s1["data_type"] == s2["data_type"]
-        ), f"Incompatible schema for column '{name}'"
+        assert s2 and s1["data_type"] == s2["data_type"], (
+            f"Incompatible schema for column '{name}'"
+        )
 
         # Ensure new has no fields outside allowed fields
         extra_fields = set(s2.keys()) - ALLOWED_COL_SCHEMA_FIELDS

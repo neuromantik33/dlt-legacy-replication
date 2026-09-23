@@ -89,7 +89,7 @@ def replication_source(
     @dlt.resource(name=lambda args: args["slot_name"], standalone=True)
     def replication_resource(slot_name: str) -> Iterable[TDataItem]:
         # start where we left off in previous run
-        start_lsn = dlt.current.resource_state().get("last_commit_lsn", 0)
+        start_lsn = dlt.current.resource_state().get("last_commit_lsn") or 0
         if flush_slot and start_lsn > 0:
             advance_slot(start_lsn, slot_name, credentials)
 
@@ -113,9 +113,11 @@ def replication_source(
             )
             yield from gen
             if gen.generated_all:
+                assert gen.last_commit_lsn is not None
                 dlt.current.resource_state()["last_commit_lsn"] = gen.last_commit_lsn
                 break
-            start_lsn = gen.last_commit_lsn
+            if gen.last_commit_lsn is not None:
+                start_lsn = gen.last_commit_lsn
 
     wal_reader = replication_resource(slot_name)
 
@@ -130,7 +132,8 @@ def replication_source(
 def _create_table_dispatch(
     table: str, repl_options: ReplicationOptions
 ) -> Callable[[TDataItem], Any]:
-    """Creates a dispatch handler that processes data items based on a specified table and optional column hints."""
+    """Creates a dispatch handler that processes data items based
+    on a specified table and optional column hints."""
     handler = BackendHandler(table, repl_options)
     # FIXME Uhhh.. why do I have to do this?
     handler.__qualname__ = "BackendHandler.__call__"  # type: ignore[attr-defined]
@@ -201,7 +204,7 @@ def init_replication(
     table_names = [table_names] if isinstance(table_names, str) else table_names or []
 
     for table in table_names:
-        table_args = (table_options or {}).get(table, {}).copy()
+        table_args = (table_options or {}).get(table) or {}
         yield sql_table(credentials=engine, table=table, schema=schema, **table_args)
 
 

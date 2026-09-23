@@ -1,9 +1,8 @@
 import faulthandler
-import pytest
-
 from typing import Iterator, Tuple
 
 import dlt
+import pytest
 from dlt.common.utils import uniq_id
 
 
@@ -21,11 +20,11 @@ def pg_version(src_config: Tuple[dlt.Pipeline, str]) -> int:
     """
     src_pl, _ = src_config
     with src_pl.sql_client() as c:
-        return int(
-            c.execute_sql(
-                "SELECT setting FROM pg_settings WHERE name = 'server_version_num';"
-            )[0][0]
+        rows = c.execute_sql(
+            "SELECT setting FROM pg_settings WHERE name = 'server_version_num'"
         )
+        assert rows is not None
+        return int(rows[0][0])
 
 
 @pytest.fixture()

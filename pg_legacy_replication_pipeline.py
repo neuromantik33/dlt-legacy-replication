@@ -2,7 +2,7 @@ import dlt
 from dlt.common.destination import Destination
 from dlt.destinations.impl.postgres.configuration import PostgresCredentials
 
-from pg_legacy_replication import init_replication, replication_source
+from sources.pg_legacy_replication import init_replication, replication_source
 
 PG_CREDS = dlt.secrets.get("sources.pg_replication.credentials", PostgresCredentials)
 
@@ -162,7 +162,7 @@ def replicate_with_column_selection() -> None:
         schema=src_pl.dataset_name,
         table_names=("tbl_x", "tbl_y"),
         repl_options={
-            "tbl_x": {"included_columns": {"c1", "c2"}}
+            "tbl_x": {"included_columns": ["c1", "c2"]}
         },  # columns not specified here are excluded from generated data items
     )
 

@@ -1,8 +1,8 @@
 from base64 import b64encode
 from enum import IntEnum
-from typing import List, Tuple
+from typing import List, Tuple, cast
 
-import pendulum
+import pendulum as p
 from dlt.common import Decimal
 from dlt.common.schema import TColumnSchema, TTableSchema, TTableSchemaColumns
 from dlt.common.typing import TDataItem
@@ -95,7 +95,9 @@ TABLE_UPDATE: List[TColumnSchema] = [
     {"name": "col11_precision", "data_type": "time", "precision": 6, "nullable": False},
 ]
 
-TABLE_UPDATE_COLUMNS_SCHEMA: TTableSchemaColumns = {t["name"]: t for t in TABLE_UPDATE}
+TABLE_UPDATE_COLUMNS_SCHEMA: TTableSchemaColumns = {
+    cast(str, t["name"]): t for t in TABLE_UPDATE
+}
 
 ROW_MESSAGES: List[dict] = [
     {
@@ -339,11 +341,11 @@ DATA_ITEMS: List[TDataItem] = [
         "_dlt_id": "gGjifTMTAUs5ag",
         "_dlt_load_id": "1728662646.2657657",
         "_pg_lsn": 1,
-        "_pg_commit_ts": pendulum.parse("2024-10-11T16:04:06.949062+00:00"),
+        "_pg_commit_ts": p.parse("2024-10-11T16:04:06.949062+00:00"),
         "_pg_tx_id": 969,
     },
     {
-        "col4": pendulum.parse("2022-05-23T13:26:45.176451+00:00"),
+        "col4": p.parse("2022-05-23T13:26:45.176451+00:00"),
         "col9": {
             "json": [1, 2, 3, "a"],
             "link": (
@@ -351,13 +353,13 @@ DATA_ITEMS: List[TDataItem] = [
                 " \\vity%3A69'08444473\n\n551163392%2C6n \r \x8e9085"
             ),
         },
-        "col10": pendulum.parse("2023-02-27", strict=False).date(),
-        "col11": pendulum.parse("13:26:45.176451", strict=False).time(),
+        "col10": p.date(2023, 2, 27),
+        "col11": p.time(13, 26, 45, 176451),
         "col12": None,
         "col13": None,
         "col14": None,
         "_pg_lsn": 1,
-        "_pg_commit_ts": pendulum.parse("2024-10-21T09:37:03.666542+00:00"),
+        "_pg_commit_ts": p.parse("2024-10-21T09:37:03.666542+00:00"),
         "_pg_tx_id": 2018,
     },
     {
@@ -369,15 +371,15 @@ DATA_ITEMS: List[TDataItem] = [
         "col_int": 0,
         "col_real": 0.0,
         "col_double": 0.0,
-        "col_time": pendulum.parse("00:00:00", strict=False).time(),
-        "col_date": pendulum.parse("1970-01-01", strict=False).date(),
-        "col_ts": pendulum.parse("1970-01-01T00:00:00+00:00"),
-        "col_tstz": pendulum.parse("1970-01-01T00:00:00+00:00"),
+        "col_time": p.time(0),
+        "col_date": p.date(1970, 1, 1),
+        "col_ts": p.parse("1970-01-01T00:00:00+00:00"),
+        "col_tstz": p.parse("1970-01-01T00:00:00+00:00"),
         "col_num": Decimal(0),
         "col_json": [0],
         "_pg_lsn": 1,
-        "_pg_deleted_ts": pendulum.parse("2024-10-19T00:56:23.354856+00:00"),
-        "_pg_commit_ts": pendulum.parse("2024-10-19T00:56:23.354856+00:00"),
+        "_pg_deleted_ts": p.parse("2024-10-19T00:56:23.354856+00:00"),
+        "_pg_commit_ts": p.parse("2024-10-19T00:56:23.354856+00:00"),
         "_pg_tx_id": 932,
     },
     {
@@ -387,9 +389,9 @@ DATA_ITEMS: List[TDataItem] = [
         "text_a": ["Network administration", "GNS3", "BGP"],
         "json_col": {"a": [None, 1]},
         # DateTime(9999, 12, 31, 23, 59, 59, tzinfo=Timezone('UTC'))
-        "large_ts_col": pendulum.parse("9999-12-31T23:59:59Z"),
+        "large_ts_col": p.parse("9999-12-31T23:59:59Z"),
         "_pg_lsn": 1,
-        "_pg_commit_ts": pendulum.parse("2025-01-14T16:58:12.023448+00:00"),
+        "_pg_commit_ts": p.parse("2025-01-14T16:58:12.023448+00:00"),
         "_pg_tx_id": 754,
     },
 ]

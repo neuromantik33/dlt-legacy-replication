@@ -23,8 +23,8 @@ Needs [uv](https://docs.astral.sh/uv/) and docker.
 make dev        # uv sync
 make lint       # ruff check
 make format     # ruff format
-make test       # brings Postgres up, then the full suite
-make test-unit  # no database needed
+make typecheck  # pyrefly check
+make test       # pytest
 ```
 
 Credentials: copy `sources/.dlt/example.secrets.toml` to `sources/.dlt/secrets.toml`.
