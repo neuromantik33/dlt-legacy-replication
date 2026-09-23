@@ -8,3 +8,4 @@ _storage/
 *.wal
 # real credentials; copy .dlt/example.secrets.toml to .dlt/secrets.toml
 sources/.dlt/secrets.toml
+.coverage
